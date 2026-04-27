@@ -1,5 +1,5 @@
 --[[
-    拼音候选词补丁 - V22（10个按键版本，7个候选词，独立码表加载）
+    拼音候选词（10个按键版本，7个候选词，有序候选词）
 ]]
 
 local logger = require("logger")
@@ -10,7 +10,7 @@ local Geom = require("ui/geometry")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local Font = require("ui/font")
 
-logger.info("[CANDIDATE_BAR] 候选词栏模块加载 - V22（独立码表加载）")
+logger.info("[CANDIDATE_BAR] 候选词栏模块加载（有序候选词）")
 
 local patched = false
 local virtualkeyboard_hooked = false
@@ -74,12 +74,13 @@ local function loadCodeMapDirectly()
     return false
 end
 
--- 从码表获取候选词
+-- 从码表获取候选词（按拼音字典序排序）
 local function getCandidatesFromCodeMap(pinyin)
     if not pinyin or pinyin == "" or not code_map then
         return nil
     end
     
+    -- 精确匹配优先
     local exact_candi = code_map[pinyin]
     if exact_candi then
         local word_list
@@ -93,30 +94,49 @@ local function getCandidatesFromCodeMap(pinyin)
         end
     end
     
-    -- 前缀匹配
-    local matches = {}
+    -- 前缀匹配：收集所有匹配的拼音
+    local matches = {}  -- { [word] = {py, word} }
     for py, words in pairs(code_map) do
         if py:find("^" .. pinyin) then
-            local word_list
+            -- 取每个拼音下的第一个词
+            local first_word
             if type(words) == "table" then
-                word_list = words
+                first_word = words[1]
             elseif type(words) == "string" then
-                word_list = {words}
+                first_word = words
             else
                 goto continue
             end
-            for _, word in ipairs(word_list) do
-                if not matches[word] then
-                    table.insert(matches, word)
-                    matches[word] = true
-                    if #matches >= page_size * 2 then break end
-                end
+            if first_word and not matches[first_word] then
+                matches[first_word] = {py = py, word = first_word}
             end
         end
         ::continue::
     end
     
-    return #matches > 0 and matches or nil
+    if not next(matches) then
+        return nil
+    end
+    
+    -- 按拼音字典序排序
+    local sorted = {}
+    for _, v in pairs(matches) do
+        table.insert(sorted, v)
+    end
+    table.sort(sorted, function(a, b)
+        return a.py < b.py
+    end)
+    
+    -- 提取排序后的词列表（最多 page_size * 2 个，保留一些用于翻页）
+    local result = {}
+    for _, v in ipairs(sorted) do
+        table.insert(result, v.word)
+        if #result >= page_size * 2 then
+            break
+        end
+    end
+    
+    return result
 end
 
 -- 更新候选列表
