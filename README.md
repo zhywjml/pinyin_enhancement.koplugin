@@ -1,0 +1,2 @@
+# pinyin_enhancement.koplugin
+在koreader拼音输入法上方显示候选词栏，点击即可输入汉字
