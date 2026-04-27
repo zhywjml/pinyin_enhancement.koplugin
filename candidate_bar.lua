@@ -1,5 +1,5 @@
 --[[
-    拼音候选词补丁 - V21（10个按键版本，7个候选词）
+    拼音候选词补丁 - V22（10个按键版本，7个候选词，独立码表加载）
 ]]
 
 local logger = require("logger")
@@ -10,7 +10,7 @@ local Geom = require("ui/geometry")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local Font = require("ui/font")
 
-logger.info("[CANDIDATE_BAR] 候选词栏模块加载 - V21（10个按键版本）")
+logger.info("[CANDIDATE_BAR] 候选词栏模块加载 - V22（独立码表加载）")
 
 local patched = false
 local virtualkeyboard_hooked = false
@@ -52,28 +52,29 @@ local function updateVirtualKeyText(key, text)
     return false
 end
 
--- 查找 IME
+-- 查找 IME（直接从键盘布局获取）
 local function findIME()
-    for k, v in pairs(package.loaded) do
-        if k and (k:find("keyboardlayouts.zh_CN_keyboard") or k:find("zh_CN_keyboard")) and v and v.ime then
-            return v.ime
-        end
+    local ok, keyboard = pcall(require, "ui/data/keyboardlayouts/zh_CN_keyboard")
+    if ok and keyboard and keyboard.ime then
+        return keyboard.ime
     end
     return nil
 end
 
--- 查找码表
-local function findCodeMap()
-    local keyboard = require("ui/data/keyboardlayouts/zh_CN_keyboard")
-    if keyboard and keyboard.code_map then
-        code_map = keyboard.code_map
+-- 直接加载码表数据
+local function loadCodeMapDirectly()
+    local ok, data = pcall(require, "ui/data/keyboardlayouts/zh_pinyin_data")
+    if ok and data and type(data) == "table" then
+        code_map = data
+        logger.info("[CANDIDATE_BAR] 加载码表成功")
         return true
     end
-    logger.warn("[CANDIDATE_BAR] 未找到码表")
+    
+    logger.warn("[CANDIDATE_BAR] 无法加载码表，拼音功能将不可用")
     return false
 end
 
--- 从码表获取候选词（同时支持字符串和table格式）
+-- 从码表获取候选词
 local function getCandidatesFromCodeMap(pinyin)
     if not pinyin or pinyin == "" or not code_map then
         return nil
@@ -92,6 +93,7 @@ local function getCandidatesFromCodeMap(pinyin)
         end
     end
     
+    -- 前缀匹配
     local matches = {}
     for py, words in pairs(code_map) do
         if py:find("^" .. pinyin) then
@@ -189,7 +191,7 @@ local function commitCandidate(candidate)
     return true
 end
 
--- 清空拼音（拼音按键回调）
+-- 清空拼音
 local function clearPinyin()
     if #current_pinyin > 0 then
         current_pinyin = ""
@@ -212,7 +214,6 @@ function updateCandidateKeys()
     end
     
     if not pinyin_enabled then
-        -- 拼音功能未启用，清空候选栏显示
         updateVirtualKeyText(pinyin_key, "[]")
         updateVirtualKeyText(prev_page_key, " ")
         updateVirtualKeyText(next_page_key, " ")
@@ -231,7 +232,6 @@ function updateCandidateKeys()
     end
     updateVirtualKeyText(pinyin_key, pinyin_text)
     
-    -- 拼音按键的回调：清空拼音
     pinyin_key.callback = function()
         clearPinyin()
     end
@@ -307,12 +307,14 @@ local function handleAddChar(key)
         return false
     end
     
-    -- 拼音功能未启用时，不拦截
     if not pinyin_enabled then
         return false
     end
     
-    -- 如果 key 是 table，尝试获取 key.key 或 key.label
+    if not code_map then
+        return false
+    end
+    
     if type(key) == "table" then
         if key.key then
             key = key.key
@@ -339,7 +341,6 @@ function enablePinyinFeatures()
         return
     end
     pinyin_enabled = true
-    -- 重置状态
     current_pinyin = ""
     current_candidates = nil
     current_page = 1
@@ -353,7 +354,6 @@ function disablePinyinFeatures()
         return
     end
     pinyin_enabled = false
-    -- 清空拼音状态
     current_pinyin = ""
     current_candidates = nil
     current_page = 1
@@ -361,7 +361,7 @@ function disablePinyinFeatures()
     updateCandidateKeys()
 end
 
--- 修改键盘布局，添加候选栏行（10个按键：拼音+上一页+7个候选词+下一页）
+-- 修改键盘布局，添加候选栏行
 local function addCandidateRowToKeyboardLayout()
     local keyboard = require("ui/data/keyboardlayouts/zh_CN_keyboard")
     if not keyboard or not keyboard.keys then
@@ -369,26 +369,19 @@ local function addCandidateRowToKeyboardLayout()
         return false
     end
     
-    -- 检查是否已经添加过候选栏行
     if keyboard.keys[1] and keyboard.keys[1][1] and keyboard.keys[1][1].label == "[]" then
         return true
     end
     
-    -- 创建候选栏行（10个按键，全部标准宽度）
     local candidate_row = {}
     
-    -- 拼音显示（标准宽度，缩小字体）
     candidate_row[1] = { label = "[]", font_size = 16 }
-    -- 上一页
     candidate_row[2] = { label = "◀" }
-    -- 7个候选词
     for i = 1, 7 do
         candidate_row[2 + i] = { label = "" }
     end
-    -- 下一页
     candidate_row[10] = { label = "▶" }
     
-    -- 插入到 keys 数组的第一行
     table.insert(keyboard.keys, 1, candidate_row)
     
     return true
@@ -417,13 +410,17 @@ local function saveCandidateKeyReferences(keyboard)
     return true
 end
 
--- Hook VirtualKeyboard（带防重复）
+-- Hook VirtualKeyboard
 local function hookVirtualKeyboard()
     if virtualkeyboard_hooked then
         return true
     end
     
-    findCodeMap()
+    -- 加载码表
+    if not loadCodeMapDirectly() then
+        logger.warn("[CANDIDATE_BAR] 码表加载失败，拼音功能将不可用")
+    end
+    
     current_ime = findIME()
     
     addCandidateRowToKeyboardLayout()
@@ -439,16 +436,13 @@ local function hookVirtualKeyboard()
     local originalInit = VirtualKeyboard.init
     local originalSetKeyboardLayout = VirtualKeyboard.setKeyboardLayout
     
-    -- hook addChar 处理字母输入
     VirtualKeyboard.addChar = function(self, key)
         if not handleAddChar(key) then
             originalAddChar(self, key)
         end
     end
     
-    -- hook delChar 处理退格键
     VirtualKeyboard.delChar = function(self)
-        -- 拼音功能启用时，优先删除拼音缓冲区中的字母
         if pinyin_enabled and #current_pinyin > 0 then
             current_pinyin = current_pinyin:sub(1, -2)
             updateCandidates()
@@ -459,10 +453,8 @@ local function hookVirtualKeyboard()
         end
     end
     
-    -- hook setKeyboardLayout 监听布局切换
     VirtualKeyboard.setKeyboardLayout = function(self, layout)
         originalSetKeyboardLayout(self, layout)
-        -- 判断切换后的布局是否为中文
         if layout == "zh_CN" or layout == "zh" then
             enablePinyinFeatures()
         else
@@ -481,7 +473,6 @@ local function hookVirtualKeyboard()
         end
         saveCandidateKeyReferences(self)
         
-        -- 判断当前布局是否为中文
         local current_layout = self:getKeyboardLayout()
         if current_layout == "zh_CN" or current_layout == "zh" then
             enablePinyinFeatures()
