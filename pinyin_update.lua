@@ -13,19 +13,18 @@ local gettext = require("gettext")
 
 local M = {}
 
--- 改成你自己的 Gitee 仓库信息
-local REPO_OWNER = "gytwo"
+-- 仓库信息（使用 GitHub API）
+local REPO_API = "https://api.github.com"
+local REPO_OWNER = "zhywjml"
 local REPO_NAME = "pinyin_enhancement.koplugin"
 
 local Device = require("device")
 local is_android = Device:isAndroid()
 
--- 获取插件目录
-local plugin_dir
-local current_file_path = (...)
-
-if is_android then
+-- 统一获取插件目录路径（始终通过 DataStorage，不依赖文件路径参数）
+local function getPluginDir()
     local data_dir = DataStorage:getDataDir()
+    -- 规范化路径：去掉开头的 "./" 或 "."
     if data_dir:sub(1, 2) == "./" then
         data_dir = data_dir:sub(3)
     elseif data_dir:sub(1, 1) == "." then
@@ -34,23 +33,15 @@ if is_android then
     if data_dir:sub(-1) ~= "/" then
         data_dir = data_dir .. "/"
     end
-    plugin_dir = data_dir .. "plugins/pinyin_enhancement.koplugin/"
-else
-    plugin_dir = current_file_path:match("(.*/)pinyin_enhancement.koplugin/")
-    if not plugin_dir then
-        local data_dir = DataStorage:getDataDir()
-        if data_dir:sub(1, 2) == "./" then
-            data_dir = data_dir:sub(3)
-        elseif data_dir:sub(1, 1) == "." then
-            data_dir = data_dir:sub(2)
-        end
-        plugin_dir = data_dir .. "plugins/pinyin_enhancement.koplugin/"
+    local dir = data_dir .. "plugins/pinyin_enhancement.koplugin/"
+    -- 去掉尾部 "/"
+    if dir:sub(-1) == "/" then
+        dir = dir:sub(1, -2)
     end
+    return dir
 end
 
-if plugin_dir:sub(-1) == "/" then
-    plugin_dir = plugin_dir:sub(1, -2)
-end
+local plugin_dir = getPluginDir()
 
 logger.info("PinyinEnhancement: 插件目录: " .. plugin_dir)
 
@@ -75,12 +66,16 @@ function M.get_all_versions()
     local all_versions = {}
     
     while true do
-        local url = string.format("https://gitee.com/api/v5/repos/%s/%s/releases?page=%d&per_page=100", REPO_OWNER, REPO_NAME, page)
+        local url = string.format("%s/repos/%s/%s/releases?page=%d&per_page=100", REPO_API, REPO_OWNER, REPO_NAME, page)
         
         logger.info("PinyinEnhancement: 请求版本列表 URL: " .. url)
         
-        local http = require("socket.http")
-        local ltn12 = require("ltn12")
+        local ok_http, http = pcall(require, "socket.http")
+        local ok_ltn12, ltn12 = pcall(require, "ltn12")
+        if not ok_http or not ok_ltn12 then
+            logger.warn("PinyinEnhancement: 网络库不可用")
+            break
+        end
         
         local response = {}
         local ok, err = pcall(function()
@@ -99,7 +94,11 @@ function M.get_all_versions()
         end
         
         local response_str = table.concat(response)
-        local json = require("json")
+        local ok_json, json = pcall(require, "json")
+        if not ok_json then
+            logger.warn("PinyinEnhancement: JSON 库不可用")
+            break
+        end
         local success, data = pcall(json.decode, response_str)
         
         if not success or not data or #data == 0 then
@@ -136,12 +135,16 @@ function M.get_all_versions()
 end
 
 function M.get_latest_version()
-    local url = string.format("https://gitee.com/api/v5/repos/%s/%s/releases/latest", REPO_OWNER, REPO_NAME)
+    local url = string.format("%s/repos/%s/%s/releases/latest", REPO_API, REPO_OWNER, REPO_NAME)
     
     logger.info("PinyinEnhancement: 请求最新版本 URL: " .. url)
     
-    local http = require("socket.http")
-    local ltn12 = require("ltn12")
+    local ok_http, http = pcall(require, "socket.http")
+    local ok_ltn12, ltn12 = pcall(require, "ltn12")
+    if not ok_http or not ok_ltn12 then
+        logger.warn("PinyinEnhancement: 网络库不可用")
+        return nil, nil, "网络库不可用"
+    end
     
     local response = {}
     local ok, err = pcall(function()
@@ -166,7 +169,11 @@ function M.get_latest_version()
     end
     
     local response_str = table.concat(response)
-    local json = require("json")
+    local ok_json, json = pcall(require, "json")
+    if not ok_json then
+        logger.warn("PinyinEnhancement: JSON 库不可用")
+        return nil, nil, "JSON 库不可用"
+    end
     local success, data = pcall(json.decode, response_str)
     
     if not success or not data then
@@ -223,91 +230,89 @@ function M.is_newer_version(current, latest)
 end
 
 function M.download_update(download_url)
+    -- 用 socket.http 下载（跨平台可靠，不依赖 curl/wget）
+    local ok_http, http = pcall(require, "socket.http")
+    local ok_ltn12, ltn12 = pcall(require, "ltn12")
+    if not ok_http or not ok_ltn12 then
+        return nil, "网络库不可用"
+    end
+
     local zip_path
     if is_android then
-        local data_dir = DataStorage:getDataDir()
-        if data_dir:sub(1, 2) == "./" then
-            data_dir = data_dir:sub(3)
-        elseif data_dir:sub(1, 1) == "." then
-            data_dir = data_dir:sub(2)
-        end
-        local plugins_dir = data_dir .. "plugins"
-        zip_path = plugins_dir .. "/pinyin_enhancement.koplugin.zip"
+        local plugins_dir = plugin_dir:match("(.*/)")
+        zip_path = plugins_dir .. "pinyin_enhancement.koplugin.zip"
         if lfs.attributes(plugins_dir, "mode") ~= "directory" then
             os.execute("mkdir -p " .. plugins_dir)
         end
     else
         zip_path = "/tmp/pinyin_enhancement.koplugin.zip"
     end
-    
-    local cmd = string.format("curl -L -o '%s' '%s' 2>/dev/null", zip_path, download_url)
-    local result = os.execute(cmd)
-    
-    if result ~= 0 then
-        cmd = string.format("wget --max-redirect=5 -O '%s' '%s' 2>/dev/null", zip_path, download_url)
-        result = os.execute(cmd)
-    end
-    
-    if result ~= 0 then
-        cmd = string.format("busybox wget -O '%s' '%s' 2>/dev/null", zip_path, download_url)
-        result = os.execute(cmd)
-    end
-    
-    if result ~= 0 then
+
+    local response = {}
+    local ok, err = pcall(function()
+        return http.request{
+            url = download_url,
+            sink = ltn12.sink.table(response),
+            headers = {
+                ["User-Agent"] = "KOReader-PinyinEnhancement",
+                ["Accept"] = "application/octet-stream",
+            },
+            -- 30 秒超时
+            timeout = 30,
+        }
+    end)
+
+    if not ok or not response or #response == 0 then
         os.remove(zip_path)
-        return nil, "下载失败"
+        return nil, "下载失败: " .. tostring(err)
     end
-    
+
+    -- 写入文件
+    local f, err_msg = io.open(zip_path, "wb")
+    if not f then
+        return nil, "无法创建文件: " .. tostring(err_msg)
+    end
+    for _, chunk in ipairs(response) do
+        f:write(chunk)
+    end
+    f:close()
+
     local size = lfs.attributes(zip_path, "size") or 0
     if size < 1000 then
         os.remove(zip_path)
         return nil, "下载的文件无效"
     end
-    
+
     logger.info("PinyinEnhancement: 下载完成，大小: " .. size .. " 字节")
     return zip_path
 end
 
 function M.install_update(zip_path)
-    if is_android then
-        if lfs.attributes(plugin_dir, "mode") ~= "directory" then
-            os.execute("mkdir -p " .. plugin_dir)
-        end
-        
-        local result = os.execute(string.format("unzip -o -q '%s' -d '%s' 2>/dev/null", zip_path, plugin_dir))
-        
-        if result ~= 0 then
-            result = os.execute(string.format("busybox unzip -o -q '%s' -d '%s' 2>/dev/null", zip_path, plugin_dir))
-        end
-        
-        os.remove(zip_path)
-        
-        if result == 0 then
-            logger.info("PinyinEnhancement: Android 自动安装成功")
-            return true
-        else
-            logger.warn("PinyinEnhancement: Android 自动安装失败")
-            return false
-        end
-    else
-        logger.info("PinyinEnhancement: 解压到插件目录: " .. plugin_dir)
-        
-        local result = os.execute(string.format("unzip -o %s -d %s", zip_path, plugin_dir))
-        
-        if result ~= 0 then
-            result = os.execute(string.format("/usr/bin/unzip -o %s -d %s", zip_path, plugin_dir))
-        end
-        
-        os.remove(zip_path)
-        
-        if result == 0 then
-            logger.info("PinyinEnhancement: 更新安装成功")
-        else
-            logger.warn("PinyinEnhancement: 更新安装失败")
-        end
-        
-        return result == 0
+    -- 确保目标目录存在
+    if lfs.attributes(plugin_dir, "mode") ~= "directory" then
+        os.execute("mkdir -p \"" .. plugin_dir .. "\"")
     end
+
+    logger.info("PinyinEnhancement: 解压到插件目录: " .. plugin_dir)
+
+    -- 尝试多种解压方式
+    local result = os.execute(string.format("unzip -o -q '%s' -d '%s' 2>/dev/null", zip_path, plugin_dir))
+    if result ~= 0 then
+        result = os.execute(string.format("busybox unzip -o -q '%s' -d '%s' 2>/dev/null", zip_path, plugin_dir))
+    end
+    if result ~= 0 then
+        result = os.execute(string.format("/usr/bin/unzip -o '%s' -d '%s' 2>/dev/null", zip_path, plugin_dir))
+    end
+
+    os.remove(zip_path)
+
+    if result == 0 then
+        logger.info("PinyinEnhancement: 更新安装成功")
+    else
+        logger.warn("PinyinEnhancement: 更新安装失败")
+    end
+
+    return result == 0
 end
 
 -- 显示版本选择对话框（用于回退）
